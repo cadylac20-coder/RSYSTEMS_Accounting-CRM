@@ -1003,7 +1003,7 @@ def create_invoice(data: NewInvoiceRequest, admin=Depends(require_admin)):
     cur = conn.execute("""
         INSERT INTO invoices (invoice_no,client_id,items_json,subtotal,tax_amount,total,status,issue_date,due_date,paid_amount,notes,created_by,created_at)
         VALUES (?,?,?,?,?,?,'sent',?,?,0,?,?,?)
-    """, (invoice_no, data.client_id, json.dumps([i.dict() for i in data.items]), subtotal, tax_amount, total,
+    """, (invoice_no, data.client_id, json.dumps([i.model_dump() for i in data.items]), subtotal, tax_amount, total,
           today_ist_str(), data.due_date, data.notes, admin["name"], ts))
     invoice_id = cur.lastrowid
 
