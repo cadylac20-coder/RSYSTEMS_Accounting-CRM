@@ -1,0 +1,9 @@
+{
+  "name": "Rsystems Accounting CRM",
+  "short_name": "Rsystems Accounts",
+  "start_url": "/static/admin.html",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#0d3055",
+  "icons": []
+}
