@@ -2,19 +2,85 @@
 Database layer for the Accounting CRM.
 
 Production (Render): set TURSO_DATABASE_URL + TURSO_AUTH_TOKEN and every
-get_db() call talks to your Turso database over plain HTTP via the
-`libsql-client` package — pure Python, no native/Rust compilation, so it
-builds reliably on Render (unlike libsql-experimental, which requires a
-Rust toolchain and fails on Render's read-only build filesystem).
+get_db() call talks to your Turso database over Turso's documented HTTP
+"pipeline" API (https://docs.turso.tech/sdk/http/quickstart) using plain
+`requests` calls — pure Python, no native/Rust compilation, so it builds
+reliably on Render, and no WebSocket handshake to fail either.
 
-Local dev: leave those env vars unset and it transparently falls back to a
-local SQLite file — same code path, same SQL, nothing to change.
+This previously used the `libsql-client` package, which talks to Turso over
+a WebSocket (the Hrana protocol). That package is now archived upstream
+(tursodatabase/libsql-client-py), and its WebSocket transport has multiple
+open reports of failing against real Turso databases with exactly this
+error:
+
+    aiohttp.client_exceptions.WSServerHandshakeError: 400,
+    message='Invalid response status'
+
+— even though the exact same URL works fine via the Turso CLI or plain
+HTTP. Talking to Turso's plain HTTP endpoint directly sidesteps that
+transport entirely: it's the same API Turso's own docs recommend for
+edge/serverless runtimes, and it's just JSON over HTTPS, so there's nothing
+version- or protocol-sensitive about it.
+
+Local dev: leave TURSO_DATABASE_URL/TURSO_AUTH_TOKEN unset and it
+transparently falls back to a local SQLite file — same code path, same SQL,
+nothing to change.
 """
 import os
+import json
+import base64
 import sqlite3
+
+import requests
 
 USE_TURSO = bool(os.environ.get("TURSO_DATABASE_URL"))
 LOCAL_DB_PATH = os.environ.get("LOCAL_DB_PATH", "accounting_crm.db")
+
+
+def _turso_http_base_url(raw_url: str) -> str:
+    """Turso gives you a libsql://... URL (meant for the websocket-based
+    protocol). The HTTP pipeline API just wants the same host over
+    https:// — this also transparently handles someone pasting in an
+    https:// URL directly, or a wss:///ws:// one."""
+    if raw_url.startswith("libsql://"):
+        return "https://" + raw_url[len("libsql://"):]
+    if raw_url.startswith("wss://"):
+        return "https://" + raw_url[len("wss://"):]
+    if raw_url.startswith("ws://"):
+        return "http://" + raw_url[len("ws://"):]
+    return raw_url.rstrip("/")
+
+
+def _to_turso_value(v):
+    """Encode a Python value into Turso's typed JSON arg format."""
+    if v is None:
+        return {"type": "null"}
+    if isinstance(v, bool):
+        return {"type": "integer", "value": str(int(v))}
+    if isinstance(v, int):
+        return {"type": "integer", "value": str(v)}
+    if isinstance(v, float):
+        return {"type": "float", "value": v}
+    if isinstance(v, (bytes, bytearray)):
+        return {"type": "blob", "value": base64.b64encode(v).decode()}
+    return {"type": "text", "value": str(v)}
+
+
+def _from_turso_value(v):
+    """Decode one of Turso's typed JSON row values back into a plain
+    Python value."""
+    if v is None:
+        return None
+    t = v.get("type")
+    if t == "null":
+        return None
+    if t == "integer":
+        return int(v["value"])
+    if t == "float":
+        return float(v["value"])
+    if t == "blob":
+        return base64.b64decode(v["value"])
+    return v.get("value")
 
 
 class Row(dict):
@@ -24,9 +90,9 @@ class Row(dict):
 
 
 class RowCursor:
-    """Normalizes both sqlite3 cursor results and libsql-client ResultSets
-    into the same fetchone()/fetchall() dict-row interface, so main.py
-    never has to know which driver actually ran the query."""
+    """Normalizes both sqlite3 cursor results and Turso's HTTP pipeline
+    results into the same fetchone()/fetchall() dict-row interface, so
+    main.py never has to know which driver actually ran the query."""
     def __init__(self, columns, rows, lastrowid=None):
         self._columns = columns
         self._rows = rows
@@ -53,10 +119,13 @@ class RowCursor:
 
 class DBConn:
     """Thin wrapper so main.py never has to know whether it's talking to
-    Turso or local SQLite — same .execute()/.commit()/.close() surface."""
-    def __init__(self, driver, raw):
+    Turso (over plain HTTP) or local SQLite — same .execute()/.commit()/
+    .close() surface either way."""
+    def __init__(self, driver, raw=None, http_base=None, http_token=None):
         self._driver = driver  # "sqlite" | "turso"
         self._raw = raw
+        self._http_base = http_base
+        self._http_token = http_token
 
     def execute(self, sql, params=()):
         params = list(params) if params else []
@@ -67,17 +136,52 @@ class DBConn:
             rows = cur.fetchall()
             return RowCursor(columns, rows, cur.lastrowid)
 
-        # Turso, via libsql-client's HTTP/Hrana transport.
-        rs = self._raw.execute(sql, params)
-        columns = list(rs.columns) if rs.columns else []
-        rows = [tuple(r) for r in rs.rows]
-        lastrowid = None
-        if sql.strip()[:6].upper() == "INSERT":
-            try:
-                id_rs = self._raw.execute("SELECT last_insert_rowid()")
-                lastrowid = id_rs.rows[0][0]
-            except Exception:
-                lastrowid = None
+        # Turso, via a single HTTP POST to its /v2/pipeline endpoint —
+        # see https://docs.turso.tech/sdk/http/reference
+        payload = {
+            "requests": [
+                {"type": "execute", "stmt": {
+                    "sql": sql,
+                    "args": [_to_turso_value(p) for p in params],
+                }},
+                {"type": "close"},
+            ]
+        }
+        try:
+            resp = requests.post(
+                f"{self._http_base}/v2/pipeline",
+                headers={
+                    "Authorization": f"Bearer {self._http_token}",
+                    "Content-Type": "application/json",
+                },
+                data=json.dumps(payload),
+                timeout=20,
+            )
+        except requests.RequestException as e:
+            raise RuntimeError(f"Could not reach Turso at {self._http_base}: {e}") from e
+
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Turso HTTP error {resp.status_code} for query {sql[:80]!r}: "
+                f"{resp.text[:500]}"
+            )
+
+        data = resp.json()
+        entry = data["results"][0]
+        if entry["type"] == "error":
+            err = entry.get("error", {})
+            raise RuntimeError(
+                f"Turso query failed for {sql[:80]!r}: {err.get('message', err)}"
+            )
+
+        result = entry["response"]["result"]
+        columns = [c.get("name") for c in result.get("cols", [])]
+        rows = [tuple(_from_turso_value(v) for v in row) for row in result.get("rows", [])]
+
+        lastrowid = result.get("last_insert_rowid")
+        if lastrowid is not None:
+            lastrowid = int(lastrowid)
+
         return RowCursor(columns, rows, lastrowid)
 
     def executescript(self, sql):
@@ -91,34 +195,34 @@ class DBConn:
     def commit(self):
         if self._driver == "sqlite":
             self._raw.commit()
-        # libsql-client applies each statement immediately over HTTP —
-        # there's no local transaction buffer to flush, so this is a no-op
-        # on the Turso path.
+        # Each Turso HTTP pipeline call above already commits that
+        # statement server-side before returning — there's no local
+        # transaction buffer to flush, so this is a no-op on that path.
 
     def close(self):
-        try:
-            self._raw.close()
-        except Exception:
-            pass
+        if self._driver == "sqlite":
+            try:
+                self._raw.close()
+            except Exception:
+                pass
+        # The Turso path holds no persistent connection between calls
+        # (each execute() is its own HTTP request that explicitly closes
+        # itself), so there's nothing to release here.
 
 
 def get_db() -> DBConn:
     if USE_TURSO:
-        import libsql_client
-        try:
-            client = libsql_client.create_client_sync(
-                url=os.environ["TURSO_DATABASE_URL"],
-                auth_token=os.environ.get("TURSO_AUTH_TOKEN"),
-            )
-        except Exception as e:
+        raw_url = os.environ["TURSO_DATABASE_URL"]
+        token = os.environ.get("TURSO_AUTH_TOKEN")
+        if not token:
             raise RuntimeError(
-                f"Could not connect to Turso ({e}). Check TURSO_DATABASE_URL "
-                f"and TURSO_AUTH_TOKEN are set correctly on Render."
-            ) from e
-        return DBConn("turso", client)
+                "TURSO_DATABASE_URL is set but TURSO_AUTH_TOKEN is missing — "
+                "both are required. Check your Render environment variables."
+            )
+        return DBConn("turso", http_base=_turso_http_base_url(raw_url), http_token=token)
     else:
         conn = sqlite3.connect(LOCAL_DB_PATH)
-        return DBConn("sqlite", conn)
+        return DBConn("sqlite", raw=conn)
 
 
 SCHEMA = """
