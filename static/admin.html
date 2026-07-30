@@ -829,7 +829,7 @@ tbody tr:hover{background:var(--surface2);cursor:pointer}
 
 <script>
 const API = window.location.origin;
-let TOKEN = localStorage.getItem('acc_crm_token') || '';
+let TOKEN = sessionStorage.getItem('acc_crm_token') || '';
 let CURRENT_ROLE = null, CURRENT_STAFF_ID = null, CURRENT_STAFF_NAME = null;
 let SESSION_ID = crypto.randomUUID ? crypto.randomUUID() : String(Date.now());
 
@@ -919,7 +919,7 @@ async function doLogin() {
     if (!r.ok) throw new Error('Invalid credentials');
     const data = await r.json();
     TOKEN = data.token;
-    localStorage.setItem('acc_crm_token', TOKEN);
+    sessionStorage.setItem('acc_crm_token', TOKEN);
     CURRENT_ROLE = data.role; CURRENT_STAFF_ID = data.id; CURRENT_STAFF_NAME = data.name;
     document.getElementById('user-name-display').textContent = data.name;
     document.getElementById('user-avatar').textContent = data.name[0].toUpperCase();
@@ -937,7 +937,7 @@ async function doLogin() {
 function doLogout() {
   logActivity('Logged out');
   TOKEN = '';
-  localStorage.removeItem('acc_crm_token');
+  sessionStorage.removeItem('acc_crm_token');
   location.reload();
 }
 
@@ -2048,7 +2048,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     nav('dashboard');
   } catch(e) {
     // Stored token is expired/invalid — fall back to the login screen.
-    TOKEN = ''; localStorage.removeItem('acc_crm_token');
+    TOKEN = ''; sessionStorage.removeItem('acc_crm_token');
   }
 });
 
