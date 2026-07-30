@@ -56,17 +56,29 @@ init_db()
 
 def _seed_superadmin():
     """First-run convenience: if there are no staff accounts yet, create one
-    superadmin from env vars so you're never locked out of a fresh deploy."""
+    superadmin from env vars so you're never locked out of a fresh deploy.
+
+    NOTE: this only runs when admin_users is completely empty. If you set
+    SEED_ADMIN_EMAIL/SEED_ADMIN_PASSWORD *after* a deploy has already
+    succeeded once (even one that only got as far as creating the schema
+    before crashing on something later), this will silently do nothing —
+    an account already exists, so nothing gets (re-)seeded. The line this
+    prints below is the way to tell which case you're in from Render's
+    Logs tab, without having to query Turso directly."""
     conn = get_db()
     count = conn.execute("SELECT COUNT(*) as c FROM admin_users").fetchone()["c"]
     if count == 0:
         email = os.environ.get("SEED_ADMIN_EMAIL", "admin@rsystems.in").strip().lower()
-        password = os.environ.get("SEED_ADMIN_PASSWORD", "ChangeMe123!")
+        password = os.environ.get("SEED_ADMIN_PASSWORD", "ChangeMe123!").strip()
         conn.execute(
             "INSERT INTO admin_users (name,email,password_hash,role,active,created_at) VALUES (?,?,?,?,1,?)",
             ("Super Admin", email, hash_password(password), "superadmin", now_ist_str())
         )
         conn.commit()
+        print(f"[seed] Created initial superadmin: {email}")
+    else:
+        print(f"[seed] Skipped — {count} admin account(s) already exist; "
+              f"SEED_ADMIN_EMAIL/SEED_ADMIN_PASSWORD are ignored once any account exists.")
     conn.close()
 
 
