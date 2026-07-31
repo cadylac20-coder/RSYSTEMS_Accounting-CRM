@@ -240,6 +240,55 @@ def delete_staff(staff_id: int, admin=Depends(require_roles("superadmin"))):
     return {"status": "deactivated"}
 
 
+@app.delete("/admin/staff/{staff_id}/permanent")
+def delete_staff_permanent(staff_id: int, admin=Depends(require_roles("superadmin"))):
+    """
+    Permanently remove a staff account — for people who are gone for good
+    (an intern who won't be back, etc.) and will never need reactivating.
+    Kept separate from the DELETE endpoint above (which only deactivates)
+    so nothing that already calls that one accidentally starts hard-deleting.
+
+    Guardrails:
+      - can't permanently delete your own account
+      - the account must already be deactivated — this makes hard-delete a
+        deliberate second step after deactivating, never a single click
+        on an active account
+      - can't delete the last remaining superadmin account, so staff
+        management is never locked out entirely
+
+    Past records (clients/leads/tasks/notices) that were assigned to this
+    person keep that assignment on file by ID, they just won't be able to
+    show that person's name anymore once the row is gone — the same way
+    any deleted record leaves a gap in history rather than silently
+    reassigning things to someone else.
+    """
+    if staff_id == admin["id"]:
+        raise HTTPException(400, "You can't delete your own account")
+
+    conn = get_db()
+    row = conn.execute("SELECT * FROM admin_users WHERE id=?", (staff_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Staff member not found")
+
+    if row["active"]:
+        conn.close()
+        raise HTTPException(400, "Deactivate this account first, then permanently delete it")
+
+    if row["role"] == "superadmin":
+        remaining = conn.execute(
+            "SELECT COUNT(*) as c FROM admin_users WHERE role='superadmin' AND id!=?", (staff_id,)
+        ).fetchone()["c"]
+        if remaining == 0:
+            conn.close()
+            raise HTTPException(400, "You can't delete the last superadmin account")
+
+    conn.execute("DELETE FROM admin_users WHERE id=?", (staff_id,))
+    conn.commit()
+    conn.close()
+    return {"status": "deleted"}
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # CLIENTS
 # ══════════════════════════════════════════════════════════════════════════
