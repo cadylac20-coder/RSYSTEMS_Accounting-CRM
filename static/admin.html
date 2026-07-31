@@ -833,7 +833,7 @@ let TOKEN = sessionStorage.getItem('acc_crm_token') || '';
 let CURRENT_ROLE = null, CURRENT_STAFF_ID = null, CURRENT_STAFF_NAME = null;
 let SESSION_ID = crypto.randomUUID ? crypto.randomUUID() : String(Date.now());
 
-const SERVICE_OPTIONS = ['GST Filing','TDS Filing','ITR Filing','ROC Compliance','Bookkeeping','Payroll','Audit','Advisory'];
+const SERVICE_OPTIONS = ['GST Filing','TDS Filing','ITR Filing','ROC Compliance','Bookkeeping','Payroll','Audit','Advisory','Immigration'];
 
 const PAGE_TITLES = {
   dashboard:'Dashboard', clients:'Clients', leads:'Leads', compliance:'Compliance Tasks',
@@ -1939,9 +1939,12 @@ async function sendTeamMessage() {
 // ══════════════════════════════════════════════════════════════════════════
 // STAFF MANAGEMENT
 // ══════════════════════════════════════════════════════════════════════════
+let lastStaffList = [];
+
 async function loadStaffManagement() {
   try {
     const data = await api('/admin/staff');
+    lastStaffList = data.staff;
     document.getElementById('staff-table').innerHTML = data.staff.map(s => `
       <tr>
         <td><strong>${s.name}</strong></td>
@@ -1952,7 +1955,14 @@ async function loadStaffManagement() {
           </select>
         </td>
         <td><span class="status status-${s.active ? 'active' : 'lost'}">${s.active ? 'Active' : 'Inactive'}</span></td>
-        <td>${s.id!==CURRENT_STAFF_ID ? `<button class="btn btn-danger btn-sm" onclick="deactivateStaff(${s.id})">${s.active?'Deactivate':'—'}</button>` : '<span style="color:var(--text3);font-size:11px">You</span>'}</td>
+        <td style="white-space:nowrap;display:flex;gap:6px">
+          ${s.id===CURRENT_STAFF_ID ? '<span style="color:var(--text3);font-size:11px">You</span>' : (
+            s.active
+              ? `<button class="btn btn-danger btn-sm" onclick="deactivateStaff(${s.id})">Deactivate</button>`
+              : `<button class="btn btn-ghost btn-sm" onclick="reactivateStaff(${s.id})">Activate</button>
+                 <button class="btn btn-danger btn-sm" onclick="deleteStaffPermanently(${s.id})">Delete</button>`
+          )}
+        </td>
       </tr>
     `).join('');
   } catch(e) { toast(e.message || 'Error loading staff','error'); }
@@ -1981,13 +1991,34 @@ async function updateStaffRole(staffId, role) {
 }
 
 async function deactivateStaff(staffId) {
-  if (!confirm('Deactivate this staff account?')) return;
+  if (!confirm('Deactivate this staff account? They can be reactivated later, or permanently deleted once deactivated.')) return;
   try {
     await api(`/admin/staff/${staffId}`, {method:'DELETE'});
     loadStaffManagement();
     assignableStaffCache = null;
     toast('Staff account deactivated');
   } catch(e) { toast(e.message || 'Error deactivating account','error'); }
+}
+
+async function reactivateStaff(staffId) {
+  try {
+    await api(`/admin/staff/${staffId}`, {method:'PUT', body: JSON.stringify({active: true})});
+    loadStaffManagement();
+    assignableStaffCache = null;
+    toast('Staff account reactivated');
+  } catch(e) { toast(e.message || 'Error reactivating account','error'); }
+}
+
+async function deleteStaffPermanently(staffId) {
+  const person = lastStaffList.find(s => s.id === staffId);
+  const label = person ? person.name : 'this account';
+  if (!confirm(`Permanently delete ${label}? This cannot be undone — use this only for people who are gone for good, like an intern who won't return. Past assignments stay on record but will no longer show their name.`)) return;
+  try {
+    await api(`/admin/staff/${staffId}/permanent`, {method:'DELETE'});
+    loadStaffManagement();
+    assignableStaffCache = null;
+    toast('Staff account permanently deleted');
+  } catch(e) { toast(e.message || 'Error deleting account','error'); }
 }
 
 // ══════════════════════════════════════════════════════════════════════════
