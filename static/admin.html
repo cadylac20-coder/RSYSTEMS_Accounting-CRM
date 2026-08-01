@@ -825,6 +825,27 @@ tbody tr:hover{background:var(--surface2);cursor:pointer}
   </div>
 </div>
 
+<!-- Edit Staff -->
+<div class="modal-overlay" id="edit-staff-modal">
+  <div class="modal">
+    <div class="modal-header"><span class="modal-title">Edit Staff Member</span><button class="modal-close" onclick="closeModal('edit-staff-modal')">×</button></div>
+    <div class="modal-body">
+      <div class="form-grid">
+        <div class="form-group"><label>Name</label><input type="text" id="es-name"></div>
+        <div class="form-group"><label>Email</label><input type="email" id="es-email"></div>
+        <div class="form-group">
+          <label>New Password</label>
+          <input type="password" id="es-password" placeholder="Leave blank to keep current password">
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('edit-staff-modal')">Cancel</button>
+      <button class="btn btn-primary" onclick="saveStaffEdit()">Save Changes</button>
+    </div>
+  </div>
+</div>
+
 <div id="toast"></div>
 
 <script>
@@ -1940,6 +1961,7 @@ async function sendTeamMessage() {
 // STAFF MANAGEMENT
 // ══════════════════════════════════════════════════════════════════════════
 let lastStaffList = [];
+let editingStaffId = null;
 
 async function loadStaffManagement() {
   try {
@@ -1956,7 +1978,8 @@ async function loadStaffManagement() {
         </td>
         <td><span class="status status-${s.active ? 'active' : 'lost'}">${s.active ? 'Active' : 'Inactive'}</span></td>
         <td style="white-space:nowrap;display:flex;gap:6px">
-          ${s.id===CURRENT_STAFF_ID ? '<span style="color:var(--text3);font-size:11px">You</span>' : (
+          <button class="btn btn-ghost btn-sm" onclick="openEditStaffModal(${s.id})">Edit</button>
+          ${s.id===CURRENT_STAFF_ID ? '' : (
             s.active
               ? `<button class="btn btn-danger btn-sm" onclick="deactivateStaff(${s.id})">Deactivate</button>`
               : `<button class="btn btn-ghost btn-sm" onclick="reactivateStaff(${s.id})">Activate</button>
@@ -1966,6 +1989,33 @@ async function loadStaffManagement() {
       </tr>
     `).join('');
   } catch(e) { toast(e.message || 'Error loading staff','error'); }
+}
+
+function openEditStaffModal(staffId) {
+  const person = lastStaffList.find(s => s.id === staffId);
+  if (!person) return;
+  document.getElementById('es-name').value = person.name;
+  document.getElementById('es-email').value = person.email;
+  document.getElementById('es-password').value = '';
+  editingStaffId = staffId;
+  openModal('edit-staff-modal');
+}
+
+async function saveStaffEdit() {
+  if (editingStaffId === null) return;
+  const name = document.getElementById('es-name').value.trim();
+  const email = document.getElementById('es-email').value.trim();
+  const password = document.getElementById('es-password').value;
+  if (!name || !email) return toast('Name and email are required','error');
+  const body = { name, email };
+  if (password) body.password = password;
+  try {
+    await api(`/admin/staff/${editingStaffId}`, {method:'PUT', body: JSON.stringify(body)});
+    closeModal('edit-staff-modal');
+    loadStaffManagement();
+    assignableStaffCache = null;
+    toast(password ? 'Staff details and password updated' : 'Staff details updated');
+  } catch(e) { toast(e.message || 'Error updating staff account','error'); }
 }
 
 async function saveNewStaff() {
